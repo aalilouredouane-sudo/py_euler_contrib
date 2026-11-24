@@ -5,9 +5,12 @@ Python tool that allocates the group STEC to perils (Euler / co-quantile allocat
 The inputs are the outputs of [py_aggregation_cat](../py_aggregation_cat) for years N-1 and N: the code reads the annual loss strips of each entity and risk (`Local_AAL_strips` sheet of the `Gross_MM_reconciliation_<entity>.xlsx` files), converts them to millions of euros and computes:
 
 - **STEC**: AEP200 − mean, where the AEP200 is the 250th largest annual loss out of 50,000 simulations;
-- **Contribution of each peril** to the STEC: `c_i = E[X_i | S around its 1/200] − E[X_i]`, where `S` is the sum of all perils and entities. The `c_i` are rescaled so that they sum exactly to the STEC of `S`;
+- **Contribution of each peril** to the STEC (Euler allocation): `c_i = E[X_i | tail scenarios of S] − E[X_i]`, where `S` is the sum of all perils and entities. By default (`allocation="tvar"`), the tail scenarios are the 250 largest of `S` (co-TVaR, stable); with `allocation="window"`, they are the 250th largest ± `half_window` (co-quantile, noisier). The `c_i` are rescaled so that they sum exactly to the STEC of `S`;
 - **Standalone STEC** of each peril, and its **diversification** (standalone − contribution);
-- **Bridge**: change in contribution per peril between N-1 and N at constant FX rate (model impact), then the effect of the new FX rate.
+- **Shapley attribution** of the change of the STEC between N-1 and N, per peril, at constant FX rate (model impact): it answers "which peril explains the change of the STEC?". The bars of the waterfall use it by default;
+- **Bridge**: change in Euler contribution per peril between N-1 and N at constant FX rate, then the effect of the new FX rate.
+
+The two methods answer different questions: **Shapley explains the change** (waterfall), **Euler explains the structure** of the tail of a given year (contribution vs standalone STEC, diversification).
 
 The results are written to an Excel workbook with, for the group and for one entity, a waterfall table with its chart and the full bridge per peril.
 
@@ -28,6 +31,7 @@ py_euler_contrib/
     ├── pipeline.py          # orchestration: parameter checks, loading, group and entity bridges, export
     ├── reader.py            # reading the py_aggregation_cat outputs and converting them to euros
     ├── metrics.py           # STEC, peril matrix, Euler contributions, standalone STEC
+    ├── shapley.py           # Shapley attribution of the STEC change per peril
     ├── bridge.py            # N-1 -> N bridge per peril and waterfall table
     └── exporter.py          # Excel output (tables and waterfall charts)
 ```
@@ -88,7 +92,9 @@ A warning is printed, and the run continues, when the `Total` column of `Local_A
    | `fx_ref` | Reference exchange rates to euro per entity, e.g. `{"XL": 0.85146239, "FRA": 1}`: value in EUR of 1 unit of local currency (EUR = 1). Keys are the entity codes of `py_aggregation_cat` (same as its `fx_rates`). Used to convert N-1 and N for the model impact. Every entity of the strips must have a rate. |
    | `fx_new` | New exchange rates to euro per entity, same format. Used to convert N a second time for the FX effect. |
    | `rp` | Return period of the STEC, 200 by default. |
-   | `half_window` | Number of scenarios taken on each side of the 1/200 scenario for the contributions, 25 by default. |
+   | `attribution` | Bars of the waterfall: `"shapley"` (default) = Shapley attribution of STEC N − STEC N-1 (`delta_shapley`); `"euler"` = change of the Euler contributions (`delta_model`). In both cases the bars sum to STEC N − STEC N-1 at the reference rate, and the `FX` bar is the same. |
+   | `allocation` | Tail scenarios used for the Euler contributions: `"tvar"` (default) = the 250 largest scenarios of the total (co-TVaR, stable); `"window"` = the 250th largest ± `half_window` (co-quantile, noisier). |
+   | `half_window` | `"window"` mode only: number of scenarios taken on each side of the 1/200 scenario, 25 by default. |
    | `min_abs` | Perils whose model impact is below this value in absolute terms (EUR m) are grouped in `Other` in the waterfall, 0.5 by default. |
    | `scale` | Divisor applied to the losses of `py_aggregation_cat` (in units) to get millions: `1e6` by default. |
 
@@ -97,19 +103,22 @@ A warning is printed, and the run continues, when the `Total` column of `Local_A
 
    | Sheet | Content |
    |---|---|
-   | `Group_waterfall` | Waterfall table: `Step`, `Value`, `Base`, `Increase`, `Decrease`, `Total`, rounded to 0.1. Rows: `<year_n_1>`, one row per peril (largest increase first), `Other`, `FX`, `<year_n>`. A stacked column chart (invisible `Base`) is placed in `H2`. |
-   | `Group_detail` | Full bridge, one row per peril, rounded to 0.01: `contrib_<year_n_1>`, `contrib_<year_n>`, `delta_model`, `delta_fx`, `standalone_<year_n_1>`, `divers_<year_n_1>`, `standalone_<year_n>`, `divers_<year_n>` (e.g. `contrib_FY25`). |
+   | `Group_waterfall` | Waterfall table: `Step`, `Value`, `Base`, `Increase`, `Decrease`, `Total`, rounded to 0.1. Rows: `<year_n_1>`, one row per peril (largest increase first, `delta_shapley` or `delta_model` depending on `attribution`), `Other`, `FX`, `<year_n>`. A stacked column chart (invisible `Base`) is placed in `H2`. |
+   | `Group_detail` | Full bridge, one row per peril, rounded to 0.01: `contrib_<year_n_1>`, `contrib_<year_n>`, `delta_model`, `delta_fx`, `delta_shapley` (only if `attribution="shapley"`), `standalone_<year_n_1>`, `divers_<year_n_1>`, `standalone_<year_n>`, `divers_<year_n>` (e.g. `contrib_FY25`). |
    | `<entity>_waterfall`, `<entity>_detail` | Same, for the strips of `entity` only. Not created if `entity=None`. |
-   | `Parameters` | Run parameters: date, years, folders, entity, exchange rates (`fx_ref`, `fx_new`), `scale`, `rp`, `half_window`, `min_abs`. |
+   | `Parameters` | Run parameters: date, years, folders, entity, exchange rates (`fx_ref`, `fx_new`), `scale`, `rp`, `half_window`, `allocation`, `attribution`, `min_abs`. |
 
    In Excel 2016+, a native Waterfall chart can also be built: select `Step` and `Value`, insert a Waterfall chart, then use "Set as total" on the first and last steps (N-1 and N).
 
 5. **Check the figures** before presenting:
    - the STEC per entity × risk must match the `Gross_STEC` sheet of `py_aggregation_cat` (divided by `scale`, in local currency), and the group STEC must match the reference Excel file (see [Checks in Python](#checks-in-python));
-   - test the stability of the contributions with `half_window` = 10, 25 and 50.
+   - in `"window"` mode, test the stability of the contributions with `half_window` = 10, 25 and 50.
+   - a peril whose strip is identical between N-1 and N can still see its Euler contribution move: it is a reallocation of the group tail, not a change of risk. Its Shapley attribution is exactly 0, which is why the waterfall uses Shapley by default.
+   - with Shapley, unchanged perils are 0, so they fall below `min_abs` and do not get a bar (they are visible at 0 in `delta_shapley` of the `_detail` sheet).
 
 6. **Run the tests** (optional, no extra dependency): from `py_euler_contrib/`, run `python -m unittest discover tests -v`. They write synthetic `Gross_MM_reconciliation_<entity>.xlsx` files in a temporary folder and check:
-   - `stec` (k-th largest value − mean), and that the contributions add up to the group STEC;
+   - `stec` (k-th largest value − mean), and that the contributions add up to the group STEC; the `"tvar"` allocation uses the `k` largest scenarios;
+   - Shapley: the attributions sum to STEC N − STEC N-1, unchanged perils are 0, the two-peril formula, a single changed peril takes all the change, new and removed perils, and the waterfall keeps the same `FX` bar and end value as with Euler;
    - that two proportional perils get proportional contributions;
    - the bridge: zero deltas when nothing changes, an FX effect of −10 % when all rates fall by 10 %, the diversification columns;
    - the exchange rates: conversion per entity, error when an entity has no rate, no FX effect when `fx_new` = `fx_ref`;
@@ -141,7 +150,8 @@ Entry point. It checks that `numpy`, `pandas` and `openpyxl` are installed and i
 
 ### `euler_contrib/config.py`
 Global constants:
-- `RETURN_PERIOD = 200`, `HALF_WINDOW = 25`, `MIN_ABS = 0.5`: default values of `rp`, `half_window` and `min_abs`.
+- `RETURN_PERIOD = 200`, `HALF_WINDOW = 25`, `ALLOCATION = "tvar"`, `ATTRIBUTION = "shapley"`, `MIN_ABS = 0.5`: default values of `rp`, `half_window`, `allocation`, `attribution` and `min_abs`. `ALLOCATIONS` and `ATTRIBUTIONS` list the accepted values.
+- `MAX_SHAPLEY_PERILS = 16`: maximum number of perils that change between N-1 and N (Shapley computes 2^n STEC; about 1 s for 12 perils at 50,000 simulations).
 - `SCALE = 1e6`: default value of `scale`.
 - `AGG_FILE_PREFIX`, `AGG_GROUP_ENTITY`, `AGG_STRIPS_SHEET`, `AGG_SIM_COL`, `AGG_TOTAL_COL`: layout of the `py_aggregation_cat` outputs (`Gross_MM_reconciliation_`, `Group`, `Local_AAL_strips`, `year`, `Total`).
 - `OTHER_STEP`, `FX_STEP`: names of the `Other` and `FX` waterfall steps.
@@ -150,7 +160,7 @@ Global constants:
 
 ### `euler_contrib/pipeline.py` — `EulerContribPipeline`
 Orchestrates the full run:
-- `_check_parameters` runs at construction: `year_n_1` and `year_n` must differ; the entity sheet label must not be `Group` or `Parameters` and must fit in an Excel sheet name.
+- `_check_parameters` runs at construction: `year_n_1` and `year_n` must differ; `allocation` must be `"tvar"` or `"window"`; `attribution` must be `"shapley"` or `"euler"`; the entity sheet label must not be `Group` or `Parameters` and must fit in an Excel sheet name.
 - `load()` reads the N-1 and N outputs of `py_aggregation_cat`, divides the losses by `scale` and returns three sets of strips in euros: N-1 at the `fx_ref` rate, N at the `fx_ref` rate (model impact) and N at the `fx_new` rate (FX effect).
 - `run()`:
   1. builds the group bridge from the strips of all entities;
@@ -167,12 +177,19 @@ Orchestrates the full run:
 - `rank` gives the rank of the 1/rp loss: `k = round(n / rp)`, i.e. 250 for 50,000 simulations and RP 200.
 - `stec` returns the k-th largest value of a strip minus its mean.
 - `peril_matrix` builds the simulations × perils matrix, summing the entities simulation by simulation.
-- `peril_contributions` sorts the simulations by total loss and takes the scenarios of rank `k − half_window` to `k + half_window − 1` (the 1/200 scenario is at index `k − 1`). The raw contribution of a peril is its mean over these scenarios minus its overall mean. The contributions are then multiplied by `STEC / sum of contributions`, so that they add up to the STEC.
+- `peril_contributions` sorts the simulations by total loss and takes the `k` largest (`allocation="tvar"`), or the scenarios of rank `k − half_window` to `k + half_window − 1` (`allocation="window"`, the 1/200 scenario is at index `k − 1`). The raw contribution of a peril is its mean over these scenarios minus its overall mean. The contributions are then multiplied by `STEC / sum of contributions`, so that they add up to the STEC.
 - `standalone_stec` returns the STEC of each peril taken alone.
 
+### `euler_contrib/shapley.py`
+- `shapley_attribution(prev, curr)` takes the N-1 and N strips at the reference rate and builds their simulations × perils matrices (a peril missing one year has a zero strip).
+- `v(S)` is the STEC of the total where the perils of `S` have their N strip and the others their N-1 strip, so `v(∅)` = STEC N-1 and `v(all)` = STEC N.
+- `φ_i = Σ over S without i of |S|! (n − |S| − 1)! / n! × (v(S ∪ {i}) − v(S))`, computed over all subsets with bit masks; each `v(S)` is computed once (cache).
+- A peril whose strip is identical in N-1 and N gets 0 and is left out of the enumeration.
+- Check: an error is raised if `Σ φ_i` differs from STEC N − STEC N-1. An error is also raised if more than `MAX_SHAPLEY_PERILS` perils changed.
+
 ### `euler_contrib/bridge.py`
-- `bridge` computes the contributions for the three sets of strips and returns, per peril: `contrib_<N-1>`, `contrib_<N>`, `delta_model = contrib_<N> − contrib_<N-1>`, `delta_fx = contribution of N at the new rate − contrib_<N>`, then the standalone STEC and the diversification for N-1 and N. The year labels `year_n_1` and `year_n` are passed as arguments. Rows are sorted by decreasing `delta_model`. A peril present in only one year counts as 0 in the other.
-- `waterfall_table` turns a bridge into the steps of the waterfall: `<year_n_1>`, one step per peril with `|delta_model| ≥ min_abs`, `Other` (sum of the smaller ones, omitted if 0), `FX`, then `<year_n> = <year_n_1> + Σ delta_model + Σ delta_fx`. For each step, `Base` is the invisible part of the stacked column and `Increase` / `Decrease` / `Total` the visible part.
+- `bridge` computes the contributions for the three sets of strips and returns, per peril: `contrib_<N-1>`, `contrib_<N>`, `delta_model = contrib_<N> − contrib_<N-1>`, `delta_fx = contribution of N at the new rate − contrib_<N>`, then the standalone STEC and the diversification for N-1 and N. The year labels `year_n_1` and `year_n` are passed as arguments. If `attribution="shapley"`, it adds `delta_shapley` (see `shapley.py`). Rows are sorted by decreasing `delta_model`. A peril present in only one year counts as 0 in the other.
+- `waterfall_table` turns a bridge into the steps of the waterfall: `<year_n_1>`, one step per peril with `|delta| ≥ min_abs` (`delta_shapley` or `delta_model` depending on `attribution`, sorted by decreasing value), `Other` (sum of the smaller ones, omitted if 0), `FX` (`Σ delta_fx`, the same in both modes), then `<year_n> = <year_n_1> + Σ delta + Σ delta_fx`. For each step, `Base` is the invisible part of the stacked column and `Increase` / `Decrease` / `Total` the visible part.
 
 ### `euler_contrib/exporter.py` — `ExcelExporter`
 Writes, for each bridge, the `<name>_waterfall` and `<name>_detail` sheets, then the `Parameters` sheet. It then reopens the workbook with `openpyxl` and adds to each `_waterfall` sheet a stacked column chart: `Base` without fill, increases in orange, decreases in blue, totals in dark blue.

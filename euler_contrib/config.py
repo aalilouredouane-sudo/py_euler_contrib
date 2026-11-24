@@ -1,5 +1,10 @@
 RETURN_PERIOD = 200   # période de retour du STEC (AEP200 - moyenne)
 HALF_WINDOW = 25      # demi-fenêtre de scénarios autour du 1/200 pour l'allocation d'Euler
+ALLOCATION = "tvar"   # "tvar" = les X plus grands scénarios (co-TVaR, stable) ; "window" = X-ième +/- half_window
+ALLOCATIONS = ("tvar", "window")
+ATTRIBUTION = "shapley"  # barres péril du waterfall : "shapley" (variation du STEC) ou "euler" (delta des contributions)
+ATTRIBUTIONS = ("shapley", "euler")
+MAX_SHAPLEY_PERILS = 16  # au-delà, 2^n STEC à calculer : trop long
 MIN_ABS = 0.5         # |delta| sous lequel un péril est regroupé dans "Other" du waterfall
 
 SCALE = 1e6           # les strips de py_aggregation_cat sont en unités : / 1e6 -> millions

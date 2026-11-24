@@ -14,7 +14,8 @@ from openpyxl import load_workbook
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from euler_contrib import (AggregationReader, EulerContribPipeline, bridge,  # noqa: E402
-                           peril_contributions, stec, to_eur, waterfall_table)
+                           peril_contributions, shapley_attribution, stec, to_eur,
+                           waterfall_table)
 
 N_SIMS = 2000          # rp = 200 -> rang k = 10
 PERILS = ["Aviation", "Cyber", "Marine", "Terror"]
@@ -72,6 +73,20 @@ class TestMetrics(unittest.TestCase):
         self.assertAlmostEqual(c.sum(), stec(total), places=6)
         self.assertEqual(sorted(c.index), PERILS)
 
+    def test_tvar_allocation_uses_k_largest_scenarios(self):
+        strips = pd.concat([to_long(make_wide(1), "A"), to_long(make_wide(2), "B")])
+        m = strips.pivot_table(index="sim", columns="peril", values="loss", aggfunc="sum")
+        total = m.sum(axis=1)
+        top = total.sort_values(ascending=False).index[:10]          # k = 2000 / 200 = 10
+        raw = m.loc[top].mean() - m.mean()
+        expected = raw * stec(total.to_numpy()) / raw.sum()
+        got = peril_contributions(strips, allocation="tvar")
+        pd.testing.assert_series_equal(got, expected, check_names=False)
+        # le mode "window" reste disponible et somme aussi au STEC
+        w = peril_contributions(strips, half_window=5, allocation="window")
+        self.assertAlmostEqual(w.sum(), stec(total.to_numpy()), places=6)
+        self.assertFalse(np.allclose(w, got))
+
     def test_proportional_perils_get_proportional_contributions(self):
         # Cyber = 3 x Aviation scénario par scénario -> contribution 3 fois plus grande
         base = np.random.default_rng(0).lognormal(0, 1, N_SIMS)
@@ -124,19 +139,82 @@ class TestBridge(unittest.TestCase):
         br = bridge(prev, curr, curr, "FY25", "FY26", half_window=5)
         self.assertEqual(br.loc["Cyber", "contrib_FY25"], 0.0)
         self.assertEqual(br.loc["Marine", "contrib_FY26"], 0.0)
+        self.assertFalse(br.isna().any().any())
+        self.assertEqual(br.loc["Marine", "standalone_FY26"], 0.0)
+        self.assertEqual(br.loc["Cyber", "divers_FY25"], 0.0)
         wf = waterfall_table(br, "FY25", "FY26")
         self.assertAlmostEqual(wf["Value"].iloc[-1], peril_contributions(curr, half_window=5).sum(), places=6)
 
     def test_small_deltas_grouped_in_other(self):
         br = pd.DataFrame({"contrib_FY25": [10.0, 5.0, 1.0], "delta_model": [2.0, 0.2, -0.1],
                            "delta_fx": [0.0, 0.0, -1.0]}, index=["Big", "Small1", "Small2"])
-        wf = waterfall_table(br, "FY25", "FY26", min_abs=0.5).set_index("Step")
+        wf = waterfall_table(br, "FY25", "FY26", min_abs=0.5, attribution="euler").set_index("Step")
         self.assertEqual(list(wf.index), ["FY25", "Big", "Other", "FX", "FY26"])
         self.assertAlmostEqual(wf.loc["Other", "Value"], 0.1)
         self.assertAlmostEqual(wf.loc["FY26", "Total"], 16.0 + 2.1 - 1.0)
         # barre de baisse : Base = niveau après la baisse
         self.assertAlmostEqual(wf.loc["FX", "Base"], 17.1)
         self.assertAlmostEqual(wf.loc["FX", "Decrease"], 1.0)
+
+
+class TestShapley(unittest.TestCase):
+    def setUp(self):
+        self.prev = pd.concat([to_long(make_wide(1), "A"), to_long(make_wide(2), "B")])
+        # N : Aviation et Cyber changent, Marine et Terror sont identiques à N-1
+        curr = self.prev.copy()
+        curr.loc[curr["peril"] == "Aviation", "loss"] *= 1.5
+        curr.loc[(curr["peril"] == "Cyber") & (curr["entity"] == "B"), "loss"] *= 0.7
+        self.curr = curr
+
+    @staticmethod
+    def group_stec(strips: pd.DataFrame) -> float:
+        return stec(strips.groupby("sim")["loss"].sum().to_numpy())
+
+    def test_sum_equals_stec_change_and_unchanged_perils_are_zero(self):
+        phi = shapley_attribution(self.prev, self.curr)
+        self.assertAlmostEqual(phi.sum(), self.group_stec(self.curr) - self.group_stec(self.prev), places=9)
+        self.assertEqual(phi["Marine"], 0.0)
+        self.assertEqual(phi["Terror"], 0.0)
+        self.assertNotEqual(phi["Aviation"], 0.0)
+
+    def test_two_perils_formula(self):
+        # phi_Aviation = 1/2 [(v(Av) - v(vide)) + (v(Av, Cy) - v(Cy))]
+        def mix(changed):
+            s = self.prev.copy()
+            for p in changed:
+                mask = s["peril"] == p
+                s.loc[mask, "loss"] = self.curr.loc[mask, "loss"]
+            return self.group_stec(s)
+        expected = 0.5 * ((mix(["Aviation"]) - mix([])) + (mix(["Aviation", "Cyber"]) - mix(["Cyber"])))
+        self.assertAlmostEqual(shapley_attribution(self.prev, self.curr)["Aviation"], expected, places=9)
+
+    def test_single_changed_peril_takes_all_the_change(self):
+        curr = self.prev.copy()
+        curr.loc[curr["peril"] == "Terror", "loss"] *= 1.2
+        phi = shapley_attribution(self.prev, curr)
+        self.assertAlmostEqual(phi["Terror"], self.group_stec(curr) - self.group_stec(self.prev), places=9)
+        self.assertTrue((phi.drop("Terror") == 0).all())
+
+    def test_new_and_removed_perils(self):
+        prev = self.prev[self.prev["peril"] != "Cyber"]
+        curr = self.prev[self.prev["peril"] != "Marine"]
+        phi = shapley_attribution(prev, curr)
+        self.assertEqual(sorted(phi.index), PERILS)
+        self.assertAlmostEqual(phi.sum(), self.group_stec(curr) - self.group_stec(prev), places=9)
+        self.assertEqual(phi["Aviation"], 0.0)
+
+    def test_waterfall_uses_shapley_and_keeps_fx(self):
+        curr_fx = self.curr.assign(loss=self.curr["loss"] * 0.9)
+        br = bridge(self.prev, self.curr, curr_fx, "FY25", "FY26")
+        wf = waterfall_table(br, "FY25", "FY26", min_abs=0.0).set_index("Step")
+        wf_euler = waterfall_table(br, "FY25", "FY26", min_abs=0.0, attribution="euler").set_index("Step")
+        perils = [p for p in wf.index if p in PERILS]
+        self.assertAlmostEqual(wf.loc[perils, "Value"].sum(),
+                               self.group_stec(self.curr) - self.group_stec(self.prev), places=6)
+        self.assertAlmostEqual(wf.loc["Marine", "Value"], 0.0)
+        self.assertAlmostEqual(wf.loc["FX", "Value"], wf_euler.loc["FX", "Value"])
+        self.assertAlmostEqual(wf.loc["FY26", "Value"], wf_euler.loc["FY26", "Value"], places=6)
+        self.assertAlmostEqual(wf.loc["FY26", "Value"], self.group_stec(curr_fx), places=6)
 
 
 class TestReader(unittest.TestCase):
@@ -230,6 +308,9 @@ class TestPipeline(unittest.TestCase):
         params = pd.read_excel(self.root / "out" / "waterfalls.xlsx", sheet_name="Parameters")
         self.assertEqual(params.set_index("Parameter").loc["half_window", "Value"], "5")
         self.assertEqual(params.set_index("Parameter").loc["year_n", "Value"], "FY26")
+        self.assertEqual(params.set_index("Parameter").loc["allocation", "Value"], "tvar")
+        self.assertEqual(params.set_index("Parameter").loc["attribution", "Value"], "shapley")
+        self.assertIn("delta_shapley", blocks["Group"].columns)
 
     def test_entities_and_perils_are_read_from_files(self):
         # une 3e entité avec ses propres périls : rien à déclarer, elle entre dans le groupe
@@ -239,6 +320,18 @@ class TestPipeline(unittest.TestCase):
                                fx_new={**FX_NEW, "DEU": 1.0}).run()
         self.assertEqual(sorted(blocks["Group"].index), sorted(PERILS + ["Flood"]))
         self.assertEqual(sorted(blocks["DEU"].index), ["Aviation", "Flood"])
+
+    def test_bad_attribution_raises(self):
+        with self.assertRaisesRegex(ValueError, "attribution must be one of"):
+            self.pipeline(attribution="marginal")
+
+    def test_euler_attribution_has_no_shapley_column(self):
+        blocks = self.pipeline(attribution="euler", entity=None).run()
+        self.assertNotIn("delta_shapley", blocks["Group"].columns)
+
+    def test_bad_allocation_raises(self):
+        with self.assertRaisesRegex(ValueError, "allocation must be one of"):
+            self.pipeline(allocation="quantile")
 
     def test_same_years_raises(self):
         with self.assertRaisesRegex(ValueError, "must differ"):

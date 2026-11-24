@@ -7,7 +7,8 @@ from openpyxl import load_workbook
 from openpyxl.chart import BarChart, Reference
 
 from .bridge import waterfall_table
-from .config import COLOR_DECREASE, COLOR_INCREASE, COLOR_TOTAL, MIN_ABS, PARAMETERS_SHEET
+from .config import (ATTRIBUTION, COLOR_DECREASE, COLOR_INCREASE, COLOR_TOTAL, MIN_ABS,
+                     PARAMETERS_SHEET)
 
 
 class ExcelExporter:
@@ -15,17 +16,20 @@ class ExcelExporter:
     (tableau + graphique empilé) et un onglet <nom>_detail (bridge complet par péril),
     puis une feuille de paramètres."""
 
-    def __init__(self, output_path: Path, year_n_1: str, year_n: str, min_abs: float = MIN_ABS):
+    def __init__(self, output_path: Path, year_n_1: str, year_n: str, min_abs: float = MIN_ABS,
+                 attribution: str = ATTRIBUTION):
         self.output_path = output_path
         self.year_n_1 = year_n_1
         self.year_n = year_n
         self.min_abs = min_abs
+        self.attribution = attribution
 
     def export(self, blocks: dict[str, pd.DataFrame], parameters: pd.DataFrame) -> None:
         self.output_path.parent.mkdir(parents=True, exist_ok=True)
         with pd.ExcelWriter(self.output_path, engine="openpyxl") as writer:
             for name, br in blocks.items():
-                waterfall_table(br, self.year_n_1, self.year_n, self.min_abs).round(1).to_excel(
+                waterfall_table(br, self.year_n_1, self.year_n, self.min_abs,
+                                self.attribution).round(1).to_excel(
                     writer, sheet_name=f"{name}_waterfall", index=False)
                 br.round(2).to_excel(writer, sheet_name=f"{name}_detail")
             parameters.to_excel(writer, sheet_name=PARAMETERS_SHEET, index=False)

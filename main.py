@@ -45,6 +45,8 @@ if __name__ == "__main__":
         output_path=Path(f"waterfalls_{year_n}.xlsx"),
         entity="XL",                            # entité détaillée en plus du groupe ; None = groupe seul
         rp=200,
-        half_window=25,                         # tester 10, 25, 50 avant de présenter
+        attribution="shapley",                  # barres du waterfall : "shapley" (variation du STEC) ou "euler"
+        allocation="tvar",                      # contributions Euler : "tvar" (co-TVaR, stable) ou "window"
+        half_window=25,                         # mode "window" uniquement : tester 10, 25, 50
         min_abs=0.5,                            # |delta| (EUR m) sous lequel un péril va dans "Other"
     ).run()

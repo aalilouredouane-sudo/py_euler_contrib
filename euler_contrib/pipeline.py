@@ -6,8 +6,8 @@ from pathlib import Path
 import pandas as pd
 
 from .bridge import bridge
-from .config import (GROUP_LABEL, HALF_WINDOW, MIN_ABS, PARAMETERS_SHEET,
-                     RETURN_PERIOD, SCALE)
+from .config import (ALLOCATION, ALLOCATIONS, ATTRIBUTION, ATTRIBUTIONS, GROUP_LABEL,
+                     HALF_WINDOW, MIN_ABS, PARAMETERS_SHEET, RETURN_PERIOD, SCALE)
 from .exporter import ExcelExporter
 from .reader import AggregationReader, to_eur
 
@@ -19,6 +19,7 @@ class EulerContribPipeline:
                  fx_ref: dict[str, float], fx_new: dict[str, float], output_path: Path,
                  entity: str | None = "XL", scale: float = SCALE,
                  rp: int = RETURN_PERIOD, half_window: int = HALF_WINDOW,
+                 allocation: str = ALLOCATION, attribution: str = ATTRIBUTION,
                  min_abs: float = MIN_ABS):
         self.year_n_1 = year_n_1
         self.year_n = year_n
@@ -30,6 +31,8 @@ class EulerContribPipeline:
         self.entity = entity
         self.rp = rp
         self.half_window = half_window
+        self.allocation = allocation  # "tvar" (co-TVaR) ou "window" (k-ième +/- half_window)
+        self.attribution = attribution  # barres du waterfall : "shapley" ou "euler"
         self.min_abs = min_abs
         self.scale = scale  # diviseur des pertes : 1e6 -> millions
         self._check_parameters()
@@ -42,6 +45,10 @@ class EulerContribPipeline:
     def _check_parameters(self) -> None:
         if self.year_n_1 == self.year_n:
             raise ValueError(f"year_n_1 and year_n must differ (both are '{self.year_n}').")
+        if self.allocation not in ALLOCATIONS:
+            raise ValueError(f"allocation must be one of {ALLOCATIONS}, got '{self.allocation}'.")
+        if self.attribution not in ATTRIBUTIONS:
+            raise ValueError(f"attribution must be one of {ATTRIBUTIONS}, got '{self.attribution}'.")
         if self.entity is None:
             return
         if self.entity_label in (GROUP_LABEL, PARAMETERS_SHEET):
@@ -70,7 +77,8 @@ class EulerContribPipeline:
     def run(self) -> dict[str, pd.DataFrame]:
         prev, curr, curr_fx = self.load()
         kw = dict(year_n_1=self.year_n_1, year_n=self.year_n,
-                  rp=self.rp, half_window=self.half_window)
+                  rp=self.rp, half_window=self.half_window, allocation=self.allocation,
+                  attribution=self.attribution)
 
         print(f"Bridge for {GROUP_LABEL}")
         blocks = {GROUP_LABEL: bridge(prev, curr, curr_fx, **kw)}
@@ -82,7 +90,8 @@ class EulerContribPipeline:
             print(f"Bridge for {self.entity}")
             blocks[self.entity_label] = bridge(sub(prev), sub(curr), sub(curr_fx), **kw)
 
-        ExcelExporter(self.output_path, self.year_n_1, self.year_n, self.min_abs).export(
+        ExcelExporter(self.output_path, self.year_n_1, self.year_n, self.min_abs,
+                      self.attribution).export(
             blocks, self._parameters_table())
         print(f"Excel file created: {self.output_path}")
         return blocks
@@ -101,6 +110,8 @@ class EulerContribPipeline:
             "entity": self.entity or "",
             "rp": self.rp,
             "half_window": self.half_window,
+            "allocation": self.allocation,
+            "attribution": self.attribution,
             "min_abs": self.min_abs,
         }
         return pd.DataFrame({"Parameter": list(rows), "Value": [str(v) for v in rows.values()]})

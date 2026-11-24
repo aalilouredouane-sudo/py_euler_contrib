@@ -3,7 +3,7 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
-from .config import HALF_WINDOW, RETURN_PERIOD
+from .config import ALLOCATION, HALF_WINDOW, RETURN_PERIOD
 
 
 def rank(n_sims: int, rp: int = RETURN_PERIOD) -> int:
@@ -24,19 +24,23 @@ def peril_matrix(strips: pd.DataFrame) -> pd.DataFrame:
 
 
 def peril_contributions(strips: pd.DataFrame, rp: int = RETURN_PERIOD,
-                        half_window: int = HALF_WINDOW) -> pd.Series:
-    """Contribution de chaque péril au STEC (allocation d'Euler / co-quantile).
+                        half_window: int = HALF_WINDOW, allocation: str = ALLOCATION) -> pd.Series:
+    """Contribution de chaque péril au STEC (allocation d'Euler).
 
-    c_i = E[X_i | S dans une fenêtre autour du 1/rp de S] - E[X_i],
-    remise à l'échelle pour que la somme des c_i soit exactement le STEC de S.
+    c_i = E[X_i | scénarios de queue de S] - E[X_i], avec :
+    - allocation="tvar"   : les k plus grands scénarios de S (co-TVaR, stable) ;
+    - allocation="window" : k-ième plus grand +/- half_window (co-quantile, plus bruité).
+    Remise à l'échelle pour que la somme des c_i soit exactement le STEC de S.
     """
     m = peril_matrix(strips)
     total = m.sum(axis=1).to_numpy()
 
-    # scénarios autour du 1/rp : la k-ième plus grande valeur (indice k - 1), +/- half_window
     k = rank(len(total), rp)
     order = np.argsort(total)[::-1]
-    window = order[max(k - 1 - half_window, 0): k + half_window]
+    if allocation == "tvar":
+        window = order[:k]                                         # les k plus grands scénarios (co-TVaR)
+    else:
+        window = order[max(k - 1 - half_window, 0): k + half_window]  # k-ième (indice k - 1) +/- half_window
 
     contrib = m.iloc[window].mean() - m.mean()
     if contrib.sum() == 0:
